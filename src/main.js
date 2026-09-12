@@ -8,4 +8,4 @@ const app = createApp(App)
 app.use(router)
 
 // 先把本地数据读进内存,再挂载,避免首屏闪"空状态"
-init().finally(() => app.mount('#app'))
+init().catch(() => { /* 挂载后展示读取错误与恢复入口。 */ }).finally(() => app.mount('#app'))

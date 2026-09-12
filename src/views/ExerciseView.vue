@@ -1,174 +1,131 @@
 <script setup>
-import { reactive, ref, computed } from 'vue'
-import { state, addExercise, updateExercise, removeExercise, latestWeight } from '../stores/health.js'
-import { EXERCISE_TYPES, estimateCalories, fmtDuration, todayKey, weekdayLabel } from '../lib/utils.js'
+import { reactive, ref, computed, watch } from 'vue'
+import { state, addExercise, updateExercise, removeExercise, weightAtDate } from '../stores/health.js'
+import { EXERCISE_TYPES, estimateCalories, fmtDuration, weekdayLabel } from '../lib/utils.js'
+import { currentDay, refreshDay } from '../lib/day.js'
 
-const typeMeta = (name) => EXERCISE_TYPES.find((t) => t.name === name) || EXERCISE_TYPES[0]
-
-const defaultForm = () => ({
-  date: todayKey(),
-  type: '快走',
-  duration: 30,
-  intensity: '中',
-  note: ''
-})
-
+const typeMeta = (name) => EXERCISE_TYPES.find((type) => type.name === name) || EXERCISE_TYPES[0]
+const defaultForm = () => ({ date: currentDay.value, type: '快走', duration: 30, intensity: '中', note: '' })
 const form = reactive(defaultForm())
-const editingId = ref(null) // null = 新增;数字 = 编辑某条
+const editingId = ref(null)
 const showForm = ref(false)
-
-const estimate = computed(() =>
-  estimateCalories(typeMeta(form.type).met, latestWeight.value?.weight || 60, form.duration || 0)
-)
-
+const busy = ref(false)
+const feedback = ref({ text: '', error: false })
+const estimate = computed(() => {
+  const duration = Number(form.duration)
+  if (!Number.isInteger(duration) || duration < 1 || duration > 1440) return null
+  return estimateCalories(typeMeta(form.type).met, weightAtDate(form.date), duration)
+})
 function openNew() {
+  refreshDay()
   Object.assign(form, defaultForm())
   editingId.value = null
   showForm.value = true
+  feedback.value = { text: '', error: false }
 }
-
 function openEdit(item) {
-  Object.assign(form, {
-    date: item.date,
-    type: item.type,
-    duration: item.duration,
-    intensity: item.intensity,
-    note: item.note
-  })
+  Object.assign(form, { date: item.date, type: item.type, duration: item.duration, intensity: item.intensity, note: item.note })
   editingId.value = item.id
   showForm.value = true
+  feedback.value = { text: '', error: false }
 }
-
 async function submit() {
-  if (!form.duration || form.duration < 1) return
-  if (editingId.value === null) await addExercise({ ...form })
-  else await updateExercise(editingId.value, { ...form })
-  showForm.value = false
+  if (busy.value || !state.loaded) return
+  busy.value = true
+  try {
+    if (editingId.value === null) await addExercise({ ...form })
+    else await updateExercise(editingId.value, { ...form })
+    showForm.value = false
+    feedback.value = { text: '运动记录已保存', error: false }
+  } catch (error) {
+    feedback.value = { text: '保存失败：' + (error?.message || '请重试'), error: true }
+  } finally { busy.value = false }
 }
-
-function cancel() {
-  showForm.value = false
-}
-
 async function del(item) {
-  if (confirm(`删除 ${item.date} 的「${item.type}」记录?`)) {
+  if (busy.value || !confirm(`删除 ${item.date} 的「${item.type}」记录？`)) return
+  busy.value = true
+  try {
     await removeExercise(item.id)
-  }
+    feedback.value = { text: '运动记录已删除', error: false }
+  } catch (error) {
+    feedback.value = { text: '删除失败：' + (error?.message || '请重试'), error: true }
+  } finally { busy.value = false }
 }
-
-/* 筛选 + 分页渲染:记录再多也只渲染 PAGE 条,滚动加载 */
 const PAGE = 20
 const filterType = ref('全部')
 const shown = ref(PAGE)
-
-const filtered = computed(() =>
-  filterType.value === '全部'
-    ? state.exercises
-    : state.exercises.filter((e) => e.type === filterType.value)
-)
-
+watch(filterType, () => { shown.value = PAGE })
+const filtered = computed(() => filterType.value === '全部' ? state.exercises : state.exercises.filter((entry) => entry.type === filterType.value))
 const visible = computed(() => filtered.value.slice(0, shown.value))
-
-const totalSummary = computed(() => {
-  let minutes = 0
-  let calories = 0
-  for (const e of filtered.value) {
-    minutes += e.duration
-    calories += e.calories
-  }
-  return { minutes, calories, count: filtered.value.length }
-})
-
-function labelOf(key) {
-  return `${key.slice(5).replace('-', '/')} 周${weekdayLabel(key)}`
-}
+const totalSummary = computed(() => filtered.value.reduce((sum, entry) => ({
+  minutes: sum.minutes + entry.duration, calories: sum.calories + entry.calories, count: sum.count + 1
+}), { minutes: 0, calories: 0, count: 0 }))
+const labelOf = (key) => `${key.slice(5).replace('-', '/')} 周${weekdayLabel(key)}`
 </script>
 
 <template>
   <div>
     <h1 class="page-title">运动记录</h1>
     <p class="page-sub">共 {{ totalSummary.count }} 次 · {{ fmtDuration(totalSummary.minutes) }} · 约 {{ totalSummary.calories }} 千卡</p>
-
-    <div class="card" v-if="showForm">
-      <div class="card-title">
-        <span>{{ editingId === null ? '➕ 新增运动' : '✏️ 编辑运动' }}</span>
-      </div>
-      <div class="form-grid">
+    <p class="feedback" :class="{ 'feedback-error': feedback.error }" :role="feedback.error ? 'alert' : 'status'">{{ feedback.text }}</p>
+    <form v-if="showForm" class="card" @submit.prevent="submit">
+      <div class="card-title"><span>{{ editingId === null ? '➕ 新增运动' : '✏️ 编辑运动' }}</span></div>
+      <fieldset class="form-grid form-fields" :disabled="busy || !state.loaded">
+        <legend class="sr-only">运动详情</legend>
         <div class="field">
-          <label>日期</label>
-          <input v-model="form.date" type="date" :max="todayKey()" />
+          <label for="exercise-date">日期</label>
+          <input id="exercise-date" v-model="form.date" type="date" :max="currentDay" required />
         </div>
         <div class="field">
-          <label>运动类型</label>
-          <select v-model="form.type">
-            <option v-for="t in EXERCISE_TYPES" :key="t.name" :value="t.name">{{ t.icon }} {{ t.name }}</option>
+          <label for="exercise-type">运动类型</label>
+          <select id="exercise-type" v-model="form.type">
+            <option v-for="type in EXERCISE_TYPES" :key="type.name" :value="type.name">{{ type.icon }} {{ type.name }}</option>
           </select>
         </div>
         <div class="field">
-          <label>时长 (分钟)</label>
-          <input v-model.number="form.duration" type="number" min="1" max="1440" step="5" />
+          <label for="exercise-duration">时长 (分钟)</label>
+          <input id="exercise-duration" v-model.number="form.duration" type="number" min="1" max="1440" step="1" required />
         </div>
         <div class="field">
-          <label>强度</label>
-          <div class="seg">
-            <button
-              v-for="i in ['低', '中', '高']"
-              :key="i"
-              type="button"
-              class="seg-btn"
-              :class="{ active: form.intensity === i }"
-              @click="form.intensity = i"
-            >{{ i }}</button>
+          <span id="intensity-label" class="field-label">强度</span>
+          <div class="seg" role="group" aria-labelledby="intensity-label">
+            <button v-for="intensity in ['低', '中', '高']" :key="intensity" type="button" class="seg-btn" :class="{ active: form.intensity === intensity }" :aria-pressed="form.intensity === intensity" @click="form.intensity = intensity">{{ intensity }}</button>
           </div>
         </div>
         <div class="field note-field">
-          <label>备注 (选填)</label>
-          <input v-model="form.note" type="text" maxlength="200" placeholder="地点、感受、搭档等" />
+          <label for="exercise-note">备注 (选填)</label>
+          <input id="exercise-note" v-model="form.note" type="text" maxlength="200" placeholder="地点、感受、搭档等" />
         </div>
-      </div>
+      </fieldset>
       <div class="submit-row">
-        <button class="btn" @click="submit">保存</button>
-        <button class="btn btn-ghost" @click="cancel">取消</button>
-        <span class="est-hint">预计消耗 ≈ {{ estimate }} 千卡</span>
+        <button type="submit" class="btn" :disabled="busy || !state.loaded">{{ busy ? '保存中…' : '保存' }}</button>
+        <button type="button" class="btn btn-ghost" :disabled="busy" @click="showForm = false">取消</button>
+        <span class="est-hint">预计消耗 ≈ {{ estimate ?? '—' }} 千卡</span>
       </div>
-    </div>
-
-    <div class="toolbar" v-else>
-      <select v-model="filterType" class="filter-select">
+    </form>
+    <div v-else class="toolbar">
+      <select v-model="filterType" class="filter-select" aria-label="筛选运动类型">
         <option>全部</option>
-        <option v-for="t in EXERCISE_TYPES" :key="t.name" :value="t.name">{{ t.name }}</option>
+        <option v-for="type in EXERCISE_TYPES" :key="type.name" :value="type.name">{{ type.name }}</option>
       </select>
-      <button class="btn" @click="openNew">➕ 记录一次运动</button>
+      <button class="btn" :disabled="busy || !state.loaded" @click="openNew">➕ 记录一次运动</button>
     </div>
-
     <div class="card" style="padding: 6px 0">
-      <div v-if="!visible.length" class="empty">
-        {{ state.loaded ? '还没有运动记录,点击上方按钮开始吧' : '加载中…' }}
-      </div>
+      <div v-if="!visible.length" class="empty">{{ state.loaded ? '还没有运动记录，点击上方按钮开始吧' : '等待本地数据加载…' }}</div>
       <TransitionGroup name="list" tag="div">
         <div v-for="item in visible" :key="item.id" class="record">
           <div class="rec-icon" :style="{ background: 'var(--brand-soft)' }">{{ typeMeta(item.type).icon }}</div>
           <div class="rec-main">
-            <div class="rec-top">
-              <strong>{{ item.type }}</strong>
-              <span class="chip" :class="item.intensity">{{ item.intensity }}强度</span>
-            </div>
-            <div class="rec-sub">
-              {{ labelOf(item.date) }} · {{ fmtDuration(item.duration) }} · ≈{{ item.calories }} 千卡
-              <span v-if="item.note" class="rec-note">「{{ item.note }}」</span>
-            </div>
+            <div class="rec-top"><strong>{{ item.type }}</strong><span class="chip" :class="item.intensity">{{ item.intensity }}强度</span></div>
+            <div class="rec-sub">{{ labelOf(item.date) }} · {{ fmtDuration(item.duration) }} · ≈{{ item.calories }} 千卡<span v-if="item.note" class="rec-note">「{{ item.note }}」</span></div>
           </div>
           <div class="rec-actions">
-            <button class="btn btn-ghost btn-sm" @click="openEdit(item)">编辑</button>
-            <button class="btn btn-danger btn-sm" @click="del(item)">删除</button>
+            <button class="btn btn-ghost btn-sm" :disabled="busy || !state.loaded" @click="openEdit(item)">编辑</button>
+            <button class="btn btn-danger btn-sm" :disabled="busy || !state.loaded" @click="del(item)">删除</button>
           </div>
         </div>
       </TransitionGroup>
-      <div v-if="filtered.length > shown" class="more-row">
-        <button class="btn btn-ghost btn-sm" @click="shown += PAGE">
-          加载更多(还有 {{ filtered.length - shown }} 条)
-        </button>
-      </div>
+      <div v-if="filtered.length > shown" class="more-row"><button class="btn btn-ghost btn-sm" @click="shown += PAGE">加载更多(还有 {{ filtered.length - shown }} 条)</button></div>
     </div>
   </div>
 </template>

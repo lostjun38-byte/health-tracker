@@ -1,85 +1,16 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { state, checkinMap } from '../stores/health.js'
+import { state } from '../stores/health.js'
 import { lastNDays, fmtDuration, shortLabel } from '../lib/utils.js'
+import { currentDay } from '../lib/day.js'
+import { summarizePeriod } from '../lib/statistics.js'
 import BarChart from '../components/BarChart.vue'
 import DonutChart from '../components/DonutChart.vue'
 
-const range = ref(7) // 7 或 30 天
-
-const keys = computed(() => lastNDays(range.value))
-const map = computed(() => checkinMap.value)
-
-const waterData = computed(() =>
-  keys.value.map((key) => ({ key, value: map.value[key]?.water || 0 }))
-)
-
-const sleepData = computed(() =>
-  keys.value.map((key) => ({ key, value: map.value[key]?.sleep || 0 }))
-)
-
-const exerciseData = computed(() => {
-  const byDay = {}
-  for (const e of state.exercises) {
-    if (e.date < keys.value[0]) break
-    byDay[e.date] = (byDay[e.date] || 0) + e.duration
-  }
-  return keys.value.map((key) => ({ key, value: byDay[key] || 0 }))
-})
-
-const typeDist = computed(() => {
-  const counts = {}
-  const from = keys.value[0]
-  const palette = ['#0f9d76', '#3f6a96', '#e07a3f', '#8e6bb5', '#d4574e', '#2f9e44', '#c2a11c', '#5c7f8a', '#999']
-  let ci = 0
-  for (const e of state.exercises) {
-    if (e.date < from) break
-    if (!counts[e.type]) counts[e.type] = { label: e.type, value: 0, color: palette[ci++ % palette.length] }
-    counts[e.type].value++
-  }
-  return Object.values(counts).sort((a, b) => b.value - a.value)
-})
-
-const summary = computed(() => {
-  const n = range.value
-  const from = keys.value[0]
-  let checkinDays = 0
-  let water = 0
-  let sleep = 0
-  let sleepDays = 0
-  for (const key of keys.value) {
-    const c = map.value[key]
-    if (c) {
-      checkinDays++
-      water += c.water
-      if (c.sleep) {
-        sleep += c.sleep
-        sleepDays++
-      }
-    }
-  }
-  let minutes = 0
-  let calories = 0
-  let times = 0
-  for (const e of state.exercises) {
-    if (e.date < from) break
-    minutes += e.duration
-    calories += e.calories
-    times++
-  }
-  return {
-    checkinRate: Math.round((checkinDays / n) * 100),
-    avgWater: checkinDays ? Math.round(water / checkinDays) : 0,
-    avgSleep: sleepDays ? Math.round((sleep / sleepDays) * 10) / 10 : 0,
-    minutes,
-    calories,
-    times
-  }
-})
-
-const dateRangeLabel = computed(
-  () => `${shortLabel(keys.value[0])} ~ ${shortLabel(keys.value[keys.value.length - 1])}`
-)
+const range = ref(7)
+const keys = computed(() => lastNDays(range.value, currentDay.value))
+const stats = computed(() => summarizePeriod(state.checkins, state.exercises, keys.value))
+const dateRangeLabel = computed(() => `${shortLabel(keys.value[0])} ~ ${shortLabel(keys.value[keys.value.length - 1])}`)
 </script>
 
 <template>
@@ -88,32 +19,32 @@ const dateRangeLabel = computed(
     <p class="page-sub">{{ dateRangeLabel }}</p>
 
     <div class="range-toggle">
-      <button :class="{ active: range === 7 }" @click="range = 7">最近 7 天</button>
-      <button :class="{ active: range === 30 }" @click="range = 30">最近 30 天</button>
+      <button :class="{ active: range === 7 }" :aria-pressed="range === 7" @click="range = 7">最近 7 天</button>
+      <button :class="{ active: range === 30 }" :aria-pressed="range === 30" @click="range = 30">最近 30 天</button>
     </div>
 
     <div class="card">
       <div class="card-title"><span>💧 每日饮水量 (ml)</span></div>
-      <BarChart :data="waterData" color="#3f8fd6" unit="ml" />
+      <BarChart :data="stats.waterData" color="#3f8fd6" unit="ml" />
     </div>
 
     <div class="card">
       <div class="card-title"><span>😴 每日睡眠 (小时)</span></div>
-      <BarChart :data="sleepData" color="#8e6bb5" unit="小时" />
+      <BarChart :data="stats.sleepData" color="#8e6bb5" unit="小时" />
     </div>
 
     <div class="two-col">
       <div class="card">
         <div class="card-title"><span>🏃 每日运动时长 (分钟)</span></div>
-        <BarChart :data="exerciseData" color="#0f9d76" unit="分钟" />
+        <BarChart :data="stats.exerciseData" color="#0f9d76" unit="分钟" />
       </div>
       <div class="card">
         <div class="card-title"><span>🥗 运动类型分布</span></div>
-        <div v-if="!typeDist.length" class="empty">该时间段还没有运动记录</div>
+        <div v-if="!stats.typeDist.length" class="empty">该时间段还没有运动记录</div>
         <div v-else class="donut-wrap">
-          <DonutChart :items="typeDist" :size="140" />
+          <DonutChart :items="stats.typeDist" :size="140" />
           <ul class="legend">
-            <li v-for="s in typeDist" :key="s.label">
+            <li v-for="s in stats.typeDist" :key="s.label">
               <i :style="{ background: s.color }"></i>{{ s.label }}
               <b>{{ s.value }}</b>
             </li>
@@ -125,12 +56,12 @@ const dateRangeLabel = computed(
     <div class="card">
       <div class="card-title"><span>📌 阶段小结</span></div>
       <div class="sum-grid">
-        <div class="sum-item"><b>{{ summary.checkinRate }}%</b><span>打卡率</span></div>
-        <div class="sum-item"><b>{{ summary.avgWater }}</b><span>日均饮水 ml</span></div>
-        <div class="sum-item"><b>{{ summary.avgSleep || '—' }}</b><span>日均睡眠 h</span></div>
-        <div class="sum-item"><b>{{ fmtDuration(summary.minutes) }}</b><span>运动总时长</span></div>
-        <div class="sum-item"><b>{{ summary.times }}</b><span>运动次数</span></div>
-        <div class="sum-item"><b>{{ summary.calories }}</b><span>总消耗 kcal</span></div>
+        <div class="sum-item"><b>{{ stats.summary.checkinRate }}%</b><span>打卡率</span></div>
+        <div class="sum-item"><b>{{ stats.summary.avgWater }}</b><span>日均饮水 ml</span></div>
+        <div class="sum-item"><b>{{ stats.summary.avgSleep ?? '—' }}</b><span>日均睡眠 h</span></div>
+        <div class="sum-item"><b>{{ fmtDuration(stats.summary.minutes) }}</b><span>运动总时长</span></div>
+        <div class="sum-item"><b>{{ stats.summary.times }}</b><span>运动次数</span></div>
+        <div class="sum-item"><b>{{ stats.summary.calories }}</b><span>总消耗 kcal</span></div>
       </div>
     </div>
   </div>
@@ -166,7 +97,7 @@ const dateRangeLabel = computed(
 
 .two-col {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   gap: 16px;
   margin-top: 16px;
 }

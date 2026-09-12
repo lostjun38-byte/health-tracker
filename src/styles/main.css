@@ -154,6 +154,7 @@ input, select, textarea { font: inherit; color: inherit; }
 
 /* 顶部栏:仅窄屏显示 */
 .topbar { display: none; }
+.bottom-nav { display: none; }
 
 /* ========= 玻璃卡片 ========= */
 .card {
@@ -381,4 +382,29 @@ input, select, textarea { font: inherit; color: inherit; }
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+
+/* 表单语义、操作反馈与键盘访问 */
+.form-fields { padding: 0; margin: 0; border: 0; min-inline-size: 0; }
+.field-label { font-size: 13px; color: var(--ink-soft); font-weight: 600; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.feedback { color: var(--brand-deep); font-size: 13px; margin: 12px 0; overflow-wrap: anywhere; }
+.feedback:empty { display: none; }
+.feedback-error, .storage-error { color: var(--danger); }
+.storage-error { margin-bottom: 16px; border-color: var(--danger); }
+.recovery-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.recovery-actions a { text-decoration: none; }
+.submit-row { flex-wrap: wrap; }
+.draft-notice { font-size: 14px; }
+.toast { max-width: calc(100vw - 32px); overflow-wrap: anywhere; }
+.toast-error { border: 2px solid var(--danger); }
+button:focus-visible, a:focus-visible, select:focus-visible, .col:focus-visible {
+  outline: 3px solid var(--brand-deep);
+  outline-offset: 3px;
+}
+button:disabled { cursor: not-allowed; }
+fieldset:disabled .mood, fieldset:disabled .seg-btn { opacity: 0.5; }
+@media (max-width: 720px) {
+  .bottom-nav { bottom: max(10px, env(safe-area-inset-bottom)); }
 }

@@ -27,7 +27,7 @@ const slices = computed(() => {
 
 <template>
   <div class="donut" :style="{ width: size + 'px', height: size + 'px' }">
-    <svg viewBox="0 0 100 100">
+    <svg viewBox="0 0 100 100" role="img" :aria-label="items.map(item => `${item.label} ${item.value} 次`).join('，')">
       <circle cx="50" cy="50" r="40" fill="none" stroke="#eef3f1" stroke-width="14" />
       <circle
         v-for="s in slices"
@@ -62,6 +62,7 @@ svg { width: 100%; height: 100%; transform: rotate(-90deg); }
 circle { transition: stroke-width 0.2s; }
 svg:hover circle[stroke-dasharray]:not([stroke='#eef3f1']) { stroke-width: 16; }
 .center {
+  pointer-events: none;
   position: absolute;
   inset: 0;
   display: flex;

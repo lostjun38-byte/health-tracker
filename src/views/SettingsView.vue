@@ -1,206 +1,150 @@
 <script setup>
-import { reactive, ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { state, init } from '../stores/health.js'
 import { clearAll, importAll } from '../lib/db.js'
+import { encodeBackup, decodeBackup } from '../lib/backup.js'
+import { todayKey } from '../lib/utils.js'
 
-const EXPORT_VERSION = 1
-
-/* ---------- 存储概况 ---------- */
-const recordCount = computed(
-  () => `${state.checkins.length} 条打卡 · ${state.exercises.length} 条运动`
-)
-
-/* ---------- 导出(可选加密) ---------- */
+const recordCount = computed(() => `${state.checkins.length} 条打卡 · ${state.exercises.length} 条运动`)
 const exportEncrypted = ref(false)
 const exportPass = ref('')
+const importPass = ref('')
+const importMode = ref('merge')
+const fileInput = ref(null)
 const busy = ref(false)
 const toast = ref('')
-
-function notify(msg) {
-  toast.value = msg
-  setTimeout(() => (toast.value = ''), 3500)
+const toastError = ref(false)
+const clearStep = ref(false)
+let toastTimer
+let clearTimer
+let downloadTimer
+let downloadUrl
+function notify(message, error = false) {
+  clearTimeout(toastTimer)
+  toast.value = message
+  toastError.value = error
+  toastTimer = setTimeout(() => { toast.value = '' }, error ? 7000 : 4500)
 }
-
+function releaseDownload() {
+  clearTimeout(downloadTimer)
+  if (downloadUrl) URL.revokeObjectURL(downloadUrl)
+  downloadUrl = null
+}
 function download(filename, text) {
-  const blob = new Blob([text], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  releaseDownload()
+  downloadUrl = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+  const link = document.createElement('a')
+  link.href = downloadUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  downloadTimer = setTimeout(releaseDownload, 1000)
 }
-
-/** PBKDF2 + AES-GCM:密码不落盘,只用于本次加解密 */
-async function deriveKey(password, salt) {
-  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey'])
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' },
-    base,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  )
-}
-
 async function doExport() {
-  if (exportEncrypted.value && exportPass.value.length < 6) {
-    notify('加密密码至少 6 位')
-    return
-  }
+  if (busy.value || !state.loaded) return
   busy.value = true
   try {
-    const payload = {
-      version: EXPORT_VERSION,
-      exportedAt: new Date().toISOString(),
-      data: { checkins: state.checkins, exercises: state.exercises }
-    }
-    if (!exportEncrypted.value) {
-      download(`health-backup-${todayStr()}.json`, JSON.stringify(payload))
-      notify('已导出明文 JSON,请妥善保管')
-    } else {
-      const salt = crypto.getRandomValues(new Uint8Array(16))
-      const iv = crypto.getRandomValues(new Uint8Array(12))
-      const key = await deriveKey(exportPass.value, salt)
-      const cipher = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
-        key,
-        new TextEncoder().encode(JSON.stringify(payload))
-      )
-      // 转成 base64 便于保存为文本文件
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(cipher)))
-      download(
-        `health-backup-${todayStr()}-enc.json`,
-        JSON.stringify({ encrypted: true, kdf: 'PBKDF2-150k-SHA256', salt: toB64(salt), iv: toB64(iv), data: b64 })
-      )
-      notify('已导出加密备份')
-    }
-  } catch (err) {
-    notify('导出失败:' + err.message)
-  } finally {
-    busy.value = false
-  }
+    const text = await encodeBackup({ checkins: state.checkins, exercises: state.exercises }, { password: exportEncrypted.value ? exportPass.value : null })
+    download(`health-backup-${todayKey()}${exportEncrypted.value ? '-enc' : ''}.json`, text)
+    notify(exportEncrypted.value ? '已导出加密备份' : '已导出 JSON 备份，请妥善保管')
+  } catch (error) { notify('导出失败：' + error.message, true) }
+  finally { busy.value = false }
 }
-
-const toB64 = (bytes) => btoa(String.fromCharCode(...bytes))
-const fromB64 = (s) => Uint8Array.from(atob(s), (ch) => ch.charCodeAt(0))
-const todayStr = () => new Date().toISOString().slice(0, 10)
-
-/* ---------- 导入 ---------- */
-const importPass = ref('')
-
-async function onImportFile(ev) {
-  const file = ev.target.files[0]
-  ev.target.value = ''
-  if (!file) return
+async function onImportFile(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || busy.value) return
   busy.value = true
+  let committed = false
   try {
-    const text = await file.text()
-    let payload = JSON.parse(text)
-    if (payload.encrypted) {
-      if (!importPass.value) {
-        notify('这是加密备份,请先填写解密密码')
-        return
-      }
-      const key = await deriveKey(importPass.value, fromB64(payload.salt))
-      const plain = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: fromB64(payload.iv) },
-        key,
-        fromB64(payload.data)
-      )
-      payload = JSON.parse(new TextDecoder().decode(plain))
-    }
-    const { checkins = [], exercises = [] } = payload.data || {}
-    if (!Array.isArray(checkins) && !Array.isArray(exercises)) {
-      notify('文件格式不正确')
-      return
-    }
-    if (!confirm(`将导入 ${checkins.length} 条打卡、${exercises.length} 条运动记录(同名数据会被覆盖),继续?`)) return
-    await importAll({ checkins, exercises })
-    state.loaded = false
-    await init()
-    notify('导入完成')
-  } catch (err) {
-    notify('导入失败:' + (err.name === 'OperationError' ? '密码错误或文件已损坏' : err.message))
-  } finally {
-    busy.value = false
-  }
+    const data = await decodeBackup(await file.text(), importPass.value)
+    const action = importMode.value === 'replace'
+      ? '覆盖恢复会替换当前全部记录'
+      : '合并去重会保留较新的同日打卡，并合并相同运动的记录次数'
+    if (!confirm(`${action}。备份包含 ${data.checkins.length} 条打卡、${data.exercises.length} 条运动，继续？`)) return
+    await importAll(data, { mode: importMode.value })
+    committed = true
+    await init({ force: true })
+    notify('恢复完成')
+  } catch (error) {
+    notify((committed ? '数据已恢复，但刷新失败，请重试读取：' : '导入失败，原数据未变更：') + error.message, true)
+  } finally { busy.value = false }
 }
-
-/* ---------- 清除 ---------- */
-const confirmText = reactive({ step1: false })
-
 async function doClear() {
-  if (!confirmText.step1) {
-    confirmText.step1 = true
-    setTimeout(() => (confirmText.step1 = false), 5000)
+  if (busy.value) return
+  if (!clearStep.value) {
+    clearStep.value = true
+    clearTimer = setTimeout(() => { clearStep.value = false }, 5000)
     return
   }
-  if (confirm('再次确认:将删除本机全部健康与运动数据,且无法恢复!')) {
+  clearTimeout(clearTimer)
+  clearStep.value = false
+  if (!confirm('再次确认：将删除本机全部健康与运动数据，且无法恢复！')) return
+  busy.value = true
+  let committed = false
+  try {
     await clearAll()
-    state.loaded = false
-    await init()
+    committed = true
+    await init({ force: true })
     notify('已清空所有本地数据')
-  }
-  confirmText.step1 = false
+  } catch (error) {
+    notify((committed ? '已清空，但刷新失败，请重试读取：' : '清空失败：') + error.message, true)
+  } finally { busy.value = false }
 }
+onBeforeUnmount(() => {
+  clearTimeout(toastTimer)
+  clearTimeout(clearTimer)
+  releaseDownload()
+})
 </script>
 
 <template>
   <div>
     <h1 class="page-title">隐私与数据</h1>
     <p class="page-sub">你的数据,只属于你</p>
-
     <div class="card privacy-card">
       <div class="card-title"><span>🛡️ 隐私说明</span></div>
       <ul class="privacy-list">
-        <li>所有打卡与运动数据仅保存在<strong>本机浏览器的 IndexedDB</strong> 中,不上传、不同步到任何服务器。</li>
-        <li>应用<strong>没有后端、没有统计埋点、没有第三方脚本</strong>,页面加载后不会发出任何网络请求。</li>
-        <li>清除浏览器站点数据会删除记录,建议定期使用下方"导出备份"。</li>
-        <li>导出备份时可选 <strong>AES-256-GCM 加密</strong>,密码基于 PBKDF2(15 万次迭代)派生,密码本身不保存在文件中,忘记密码将无法恢复数据。</li>
+        <li>所有打卡与运动数据仅保存在<strong>本机浏览器</strong>中，不上传、不同步到任何服务器。</li>
+        <li>应用<strong>没有后端、没有统计埋点</strong>，不会发送健康数据。</li>
+        <li>清除浏览器站点数据会删除记录，建议定期使用下方“导出备份”。</li>
+        <li>备份可选<strong>密码加密</strong>。密码不保存在备份中，忘记密码将无法恢复数据。</li>
       </ul>
     </div>
-
     <div class="card">
-      <div class="card-title"><span>📦 导出备份</span>
-        <span class="muted">{{ recordCount }}</span>
-      </div>
-      <label class="check-row">
-        <input v-model="exportEncrypted" type="checkbox" />
-        使用密码加密备份文件
-      </label>
+      <div class="card-title"><span>📦 导出备份</span><span class="muted">{{ recordCount }}</span></div>
+      <label class="check-row"><input v-model="exportEncrypted" type="checkbox" :disabled="busy" />使用密码加密备份文件</label>
       <div v-if="exportEncrypted" class="field pass-field">
-        <label>加密密码(至少 6 位,请务必牢记)</label>
-        <input v-model="exportPass" type="password" placeholder="导出密码" autocomplete="new-password" />
+        <label for="export-password">加密密码 (至少 6 位，请务必牢记)</label>
+        <input id="export-password" v-model="exportPass" type="password" placeholder="导出密码" autocomplete="new-password" :disabled="busy" />
       </div>
-      <button class="btn" :disabled="busy" @click="doExport">
-        {{ exportEncrypted ? '导出加密备份' : '导出 JSON 备份' }}
-      </button>
+      <button class="btn" :disabled="busy || !state.loaded" @click="doExport">{{ busy ? '处理中…' : exportEncrypted ? '导出加密备份' : '导出 JSON 备份' }}</button>
     </div>
-
     <div class="card">
       <div class="card-title"><span>📥 导入备份</span></div>
       <div class="field pass-field">
-        <label>解密密码(仅导入加密备份时需要)</label>
-        <input v-model="importPass" type="password" placeholder="备份加密时使用的密码" autocomplete="off" />
+        <label for="import-mode">恢复方式</label>
+        <select id="import-mode" v-model="importMode" :disabled="busy">
+          <option value="merge">合并去重（推荐）</option>
+          <option value="replace">覆盖恢复（替换当前全部记录）</option>
+        </select>
       </div>
-      <label class="btn btn-ghost file-btn" :class="{ disabled: busy }">
-        选择备份文件…
-        <input type="file" accept=".json,application/json" hidden @change="onImportFile" />
-      </label>
-      <p class="hint">导入时同名日期的打卡会被覆盖,运动记录主键会重新分配。</p>
+      <p id="import-mode-hint" class="hint">{{ importMode === 'merge' ? '同日打卡保留更新时间较新的记录；相同运动按记录次数合并，重复导入不会累加。' : '使用备份替换当前全部数据。只有完整校验并恢复成功后，替换才会生效。' }}</p>
+      <div class="field pass-field">
+        <label for="import-password">解密密码 (仅导入加密备份时需要)</label>
+        <input id="import-password" v-model="importPass" type="password" placeholder="备份加密时使用的密码" autocomplete="off" :disabled="busy" />
+      </div>
+      <button class="btn btn-ghost" :disabled="busy" aria-describedby="import-mode-hint" @click="fileInput?.click()">{{ busy ? '处理中…' : '选择备份文件…' }}</button>
+      <input ref="fileInput" type="file" accept=".json,application/json" hidden :disabled="busy" @change="onImportFile" />
     </div>
-
     <div class="card danger-card">
       <div class="card-title"><span>🗑️ 清除全部数据</span></div>
-      <p class="hint">将删除本机保存的所有打卡与运动记录,操作不可恢复。</p>
-      <button class="btn btn-danger" :disabled="busy" @click="doClear">
-        {{ confirmText.step1 ? '再点一次确认删除!' : '清除所有本地数据' }}
-      </button>
+      <p class="hint">将删除本机保存的所有打卡与运动记录，操作不可恢复。</p>
+      <button class="btn btn-danger" :disabled="busy" @click="doClear">{{ clearStep ? '再点一次确认删除！' : '清除所有本地数据' }}</button>
     </div>
-
     <Transition name="fade">
-      <div v-if="toast" class="toast">{{ toast }}</div>
+      <div v-if="toast" class="toast" :class="{ 'toast-error': toastError }" :role="toastError ? 'alert' : 'status'">{{ toast }}</div>
     </Transition>
   </div>
 </template>

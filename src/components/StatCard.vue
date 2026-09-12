@@ -1,34 +1,33 @@
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 
-const props = defineProps({
-  icon: String,
-  label: String,
-  value: [String, Number],
-  unit: String,
-  hint: String
-})
-
-/* 数字值挂载时从 0 滚动到目标值(easeOut),之后的变化即时显示 */
-const display = ref(typeof props.value === 'number' ? 0 : props.value)
-
+const props = defineProps({ icon: String, label: String, value: [String, Number], unit: String, hint: String })
+const display = ref(props.value)
+let raf = 0
+let motion
+function stopAnimation() {
+  cancelAnimationFrame(raf)
+  raf = 0
+  display.value = props.value
+}
 onMounted(() => {
-  if (typeof props.value !== 'number') return
+  motion = matchMedia('(prefers-reduced-motion: reduce)')
+  motion.addEventListener('change', stopAnimation)
+  if (motion.matches || typeof props.value !== 'number' || !props.value) return
   const target = props.value
   const start = performance.now()
-  const dur = 750
-  const step = (t) => {
-    const p = Math.min(1, (t - start) / dur)
-    const eased = 1 - Math.pow(1 - p, 3)
-    const v = target * eased
-    display.value = Number.isInteger(target) ? Math.round(v) : Math.round(v * 10) / 10
-    if (p < 1) requestAnimationFrame(step)
-    else display.value = target
+  display.value = 0
+  const step = (time) => {
+    const progress = Math.min(1, (time - start) / 750)
+    const value = target * (1 - Math.pow(1 - progress, 3))
+    display.value = Number.isInteger(target) ? Math.round(value) : Math.round(value * 10) / 10
+    if (progress < 1) raf = requestAnimationFrame(step)
+    else { display.value = props.value; raf = 0 }
   }
-  requestAnimationFrame(step)
+  raf = requestAnimationFrame(step)
 })
-
-watch(() => props.value, (v) => { display.value = v })
+watch(() => props.value, stopAnimation, { flush: 'sync' })
+onBeforeUnmount(() => { cancelAnimationFrame(raf); motion?.removeEventListener('change', stopAnimation) })
 </script>
 
 <template>

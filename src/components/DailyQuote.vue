@@ -1,10 +1,12 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { currentDay } from '../lib/day.js'
 import { getQuote } from '../lib/quotes.js'
 
 /** 每日名言:按日期确定性选取,"换一句"在本地数组里轮换 */
 const quote = ref(getQuote())
 let offset = 0
+watch(currentDay, () => { offset = 0; quote.value = getQuote() })
 
 function next() {
   quote.value = getQuote(++offset)

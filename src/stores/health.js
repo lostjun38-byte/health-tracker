@@ -1,146 +1,101 @@
-/**
- * 全局响应式 store:一次把数据读入内存,之后读写同步内存 + 异步落库。
- * 数据量是"个人打卡"级别(几百到几千条),常驻内存毫无压力,
- *换来的是所有页面渲染零查询延迟。
- */
+/** 内存缓存仅在本地事务提交成功后更新。 */
 import { reactive, computed } from 'vue'
 import * as db from '../lib/db.js'
-import { todayKey, estimateCalories, EXERCISE_TYPES } from '../lib/utils.js'
+import { addDays } from '../lib/utils.js'
+import { currentDay } from '../lib/day.js'
+import { validateCheckin, validateData, validateExercise } from '../lib/validation.js'
 
-export const state = reactive({
-  checkins: [], // 按 date 升序
-  exercises: [], // 按 date 倒序,新记录在前
-  loaded: false,
-  error: ''
-})
+export const state = reactive({ checkins: [], exercises: [], loaded: false, error: '' })
+let initialization = null
+const sortCheckins = (items) => items.sort((a, b) => a.date.localeCompare(b.date))
+const sortExercises = (items) => items.sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id)
 
-export async function init() {
-  if (state.loaded) return
-  try {
-    const [checkins, exercises] = await Promise.all([
-      db.getAllCheckins(),
-      db.getAllExercises()
-    ])
-    checkins.sort((a, b) => a.date.localeCompare(b.date))
-    exercises.sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id)
-    state.checkins = checkins
-    state.exercises = exercises
-  } catch (err) {
-    state.error = '本地数据库不可用:' + err.message
-  } finally {
-    state.loaded = true
-  }
+export function init({ force = false } = {}) {
+  if (initialization) return initialization
+  if (state.loaded && !force) return Promise.resolve()
+  initialization = (async () => {
+    try {
+      const [checkins, exercises] = await Promise.all([db.getAllCheckins(), db.getAllExercises()])
+      const clean = validateData({ checkins, exercises })
+      state.checkins = sortCheckins(clean.checkins)
+      state.exercises = sortExercises(clean.exercises)
+      state.error = ''
+      state.loaded = true
+    } catch (error) {
+      state.error = '本地数据读取失败：' + (error?.message || '请重试')
+      state.loaded = false
+      throw error
+    }
+  })().finally(() => { initialization = null })
+  return initialization
 }
-
-/* ---------- 打卡 ---------- */
 
 export async function saveCheckin(entry) {
-  const clean = {
-    date: entry.date,
-    water: clampNum(entry.water, 0, 10000),
-    sleep: clampNum(entry.sleep, 0, 24, 1),
-    mood: clampNum(entry.mood, 1, 5),
-    weight: entry.weight ? clampNum(entry.weight, 20, 300, 1) : null,
-    steps: entry.steps ? Math.round(clampNum(entry.steps, 0, 200000)) : null,
-    note: (entry.note || '').slice(0, 200),
-    updatedAt: Date.now()
-  }
-  const idx = state.checkins.findIndex((c) => c.date === clean.date)
-  if (idx >= 0) state.checkins[idx] = clean
-  else {
-    state.checkins.push(clean)
-    state.checkins.sort((a, b) => a.date.localeCompare(b.date))
-  }
+  const clean = validateCheckin({ ...entry, updatedAt: Date.now() }, { coerce: true })
   await db.putCheckin(clean)
+  const idx = state.checkins.findIndex((item) => item.date === clean.date)
+  if (idx >= 0) state.checkins[idx] = clean
+  else state.checkins.push(clean)
+  sortCheckins(state.checkins)
+  return clean
 }
 
-/* ---------- 运动 ---------- */
+export function weightAtDate(date = currentDay.value) {
+  for (let i = state.checkins.length - 1; i >= 0; i--) {
+    const item = state.checkins[i]
+    if (item.date <= date && item.weight !== null) return item.weight
+  }
+  return 60
+}
+
+function normalizeExercise(entry) {
+  return validateExercise({ ...entry, date: entry.date ?? currentDay.value }, {
+    coerce: true,
+    calculate: true,
+    weight: entry.weight ?? weightAtDate(entry.date ?? currentDay.value)
+  })
+}
 
 export async function addExercise(entry) {
   const clean = normalizeExercise(entry)
   const id = await db.putExercise(clean)
-  state.exercises.unshift({ ...clean, id })
+  state.exercises.push({ ...clean, id })
+  sortExercises(state.exercises)
 }
 
 export async function updateExercise(id, entry) {
   const clean = normalizeExercise(entry)
   await db.putExercise({ ...clean, id })
-  const idx = state.exercises.findIndex((e) => e.id === id)
+  const idx = state.exercises.findIndex((item) => item.id === id)
   if (idx >= 0) state.exercises[idx] = { ...clean, id }
+  sortExercises(state.exercises)
 }
 
 export async function removeExercise(id) {
   await db.deleteExercise(id)
-  state.exercises = state.exercises.filter((e) => e.id !== id)
+  state.exercises = state.exercises.filter((item) => item.id !== id)
 }
 
-function normalizeExercise(entry) {
-  const type = EXERCISE_TYPES.find((t) => t.name === entry.type) || EXERCISE_TYPES[0]
-  // 热量估算优先使用用户最近一次记录的体重,没有则按 60kg
-  let weight = entry.weight
-  if (!weight) {
-    for (let i = state.checkins.length - 1; i >= 0; i--) {
-      if (state.checkins[i].weight) {
-        weight = state.checkins[i].weight
-        break
-      }
-    }
-  }
-  return {
-    date: entry.date || todayKey(),
-    type: type.name,
-    duration: clampNum(entry.duration, 1, 1440),
-    intensity: ['低', '中', '高'].includes(entry.intensity) ? entry.intensity : '中',
-    calories: estimateCalories(type.met, weight || 60, entry.duration),
-    note: (entry.note || '').slice(0, 200)
-  }
-}
+export const checkinMap = computed(() => Object.fromEntries(state.checkins.map((item) => [item.date, item])))
+export const todayCheckin = computed(() => checkinMap.value[currentDay.value])
 
-function clampNum(v, min, max, decimals = 0) {
-  const n = Number(v) || 0
-  const clamped = Math.min(max, Math.max(min, n))
-  return decimals ? Math.round(clamped * 10) / 10 : clamped
-}
-
-/* ---------- 派生数据 ---------- */
-
-export const checkinMap = computed(() => {
-  const map = {}
-  for (const c of state.checkins) map[c.date] = c
-  return map
-})
-
-export const todayCheckin = computed(() => checkinMap.value[todayKey()])
-
-/** 连续打卡天数:从今天(或昨天)往前数连续有打卡记录的天数 */
 export const streak = computed(() => {
-  if (!state.checkins.length) return 0
-  let key = todayKey()
+  let key = currentDay.value
   const map = checkinMap.value
-  if (!map[key]) {
-    const yest = new Date()
-    key = todayKey(new Date(yest.getFullYear(), yest.getMonth(), yest.getDate() - 1))
-    if (!map[key]) return 0
-  }
+  if (!map[key]) key = addDays(key, -1)
   let count = 0
-  while (map[key]) {
-    count++
-    const [y, m, d] = key.split('-').map(Number)
-    key = todayKey(new Date(y, m - 1, d - 1))
-  }
+  while (map[key]) { count++; key = addDays(key, -1) }
   return count
 })
 
-/** 今日运动合计 */
 export const todayExerciseSummary = computed(() => {
-  const key = todayKey()
   let minutes = 0
   let calories = 0
   let count = 0
-  for (const e of state.exercises) {
-    if (e.date !== key) break // 已按日期倒序,可以直接停
-    minutes += e.duration
-    calories += e.calories
+  for (const entry of state.exercises) {
+    if (entry.date !== currentDay.value) continue
+    minutes += entry.duration
+    calories += entry.calories
     count++
   }
   return { minutes, calories, count }
@@ -148,7 +103,8 @@ export const todayExerciseSummary = computed(() => {
 
 export const latestWeight = computed(() => {
   for (let i = state.checkins.length - 1; i >= 0; i--) {
-    if (state.checkins[i].weight) return state.checkins[i]
+    const item = state.checkins[i]
+    if (item.date <= currentDay.value && item.weight !== null) return item
   }
   return null
 })

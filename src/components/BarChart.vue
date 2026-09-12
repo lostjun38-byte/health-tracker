@@ -33,6 +33,9 @@ const tip = (d) => `${d.key}\n${d.value}${props.unit}`
       v-for="(d, i) in bars"
       :key="d.key"
       class="col"
+      role="img"
+      tabindex="0"
+      :aria-label="`${d.key}：${d.value}${unit}`"
       :title="tip(d)"
     >
       <div class="bar-wrap">

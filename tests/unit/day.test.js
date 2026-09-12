@@ -1,0 +1,27 @@
+import { expect, test, vi } from 'vitest'
+import { currentDay, startDayClock } from '../../src/lib/day.js'
+
+test('跨零点和恢复前台都会刷新日期，卸载时清理定时器', () => {
+  vi.useRealTimers()
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-09-12T23:59:59'))
+  const document = Object.assign(new EventTarget(), { hidden: false })
+  const window = new EventTarget()
+  vi.stubGlobal('document', document)
+  vi.stubGlobal('window', window)
+  const stop = startDayClock()
+  expect(currentDay.value).toBe('2026-09-12')
+  vi.advanceTimersByTime(1100)
+  expect(currentDay.value).toBe('2026-09-13')
+  vi.setSystemTime(new Date('2026-09-15T12:00:00'))
+  document.dispatchEvent(new Event('visibilitychange'))
+  expect(currentDay.value).toBe('2026-09-15')
+  vi.setSystemTime(new Date('2026-09-16T12:00:00'))
+  window.dispatchEvent(new Event('focus'))
+  expect(currentDay.value).toBe('2026-09-16')
+  stop()
+  expect(vi.getTimerCount()).toBe(0)
+  vi.setSystemTime(new Date('2026-09-17T12:00:00'))
+  window.dispatchEvent(new Event('focus'))
+  expect(currentDay.value).toBe('2026-09-16')
+})

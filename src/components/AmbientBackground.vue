@@ -1,43 +1,50 @@
 <script setup>
-/**
- * 动态氛围背景:渐变底色 + 三个缓慢漂浮的模糊光斑。
- * 鼠标移动时整个光斑层做惯性视差(rAF + lerp),
- * 仅使用 transform,不触发重排;遵循 prefers-reduced-motion。
- */
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 
 const layer = ref(null)
+const paused = ref(false)
 let raf = 0
 let tx = 0, ty = 0, cx = 0, cy = 0
-
-function onMove(e) {
-  const nx = e.clientX / innerWidth - 0.5
-  const ny = e.clientY / innerHeight - 0.5
-  tx = nx * 36
-  ty = ny * 26
-}
-
+let motion
 function tick() {
-  cx += (tx - cx) * 0.055
-  cy += (ty - cy) * 0.055
+  raf = 0
+  const settled = Math.abs(tx - cx) + Math.abs(ty - cy) < 0.04
+  cx = settled ? tx : cx + (tx - cx) * 0.12
+  cy = settled ? ty : cy + (ty - cy) * 0.12
   if (layer.value) layer.value.style.transform = `translate3d(${cx.toFixed(2)}px, ${cy.toFixed(2)}px, 0)`
-  raf = requestAnimationFrame(tick)
+  if (!settled) raf = requestAnimationFrame(tick)
 }
-
+function onMove(event) {
+  if (motion?.matches || document.hidden || event.pointerType === 'touch') return
+  tx = (event.clientX / innerWidth - 0.5) * 36
+  ty = (event.clientY / innerHeight - 0.5) * 26
+  if (!raf && Math.abs(tx - cx) + Math.abs(ty - cy) >= 0.04) raf = requestAnimationFrame(tick)
+}
+function updateMotion() {
+  paused.value = document.hidden || motion.matches
+  if (paused.value) { cancelAnimationFrame(raf); raf = 0 }
+  if (motion.matches) {
+    tx = ty = cx = cy = 0
+    if (layer.value) layer.value.style.transform = 'none'
+  }
+}
 onMounted(() => {
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  motion = matchMedia('(prefers-reduced-motion: reduce)')
+  updateMotion()
+  motion.addEventListener('change', updateMotion)
+  document.addEventListener('visibilitychange', updateMotion)
   addEventListener('pointermove', onMove, { passive: true })
-  raf = requestAnimationFrame(tick)
 })
-
 onBeforeUnmount(() => {
-  removeEventListener('pointermove', onMove)
   cancelAnimationFrame(raf)
+  motion?.removeEventListener('change', updateMotion)
+  document.removeEventListener('visibilitychange', updateMotion)
+  removeEventListener('pointermove', onMove)
 })
 </script>
 
 <template>
-  <div class="ambient" aria-hidden="true">
+  <div class="ambient" :class="{ paused }" aria-hidden="true">
     <div ref="layer" class="ambient-layer">
       <div class="blob blob-a"></div>
       <div class="blob blob-b"></div>
@@ -86,6 +93,8 @@ onBeforeUnmount(() => {
 @keyframes drift-a { to { transform: translate(6vmax, 5vmax) scale(1.16); } }
 @keyframes drift-b { to { transform: translate(-6vmax, 7vmax) scale(0.88); } }
 @keyframes drift-c { to { transform: translate(5vmax, -6vmax) scale(1.14); } }
+
+.paused .blob { animation-play-state: paused; }
 
 @media (prefers-reduced-motion: reduce) {
   .blob { animation: none; }
