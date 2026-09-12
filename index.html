@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="个人健康打卡与运动记录 —— 数据仅保存在本机浏览器中" />
+    <title>健康打卡 · 运动记录</title>
+    <style>
+      /* 首屏骨架:在 JS 加载前先渲染底色与标题,避免白屏闪烁 */
+      html { background: #f4f7f6; }
+      #app:empty::after {
+        content: '加载中…';
+        display: flex;
+        justify-content: center;
+        padding-top: 40vh;
+        color: #6b7f7a;
+        font: 15px/1.6 system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
